@@ -9,6 +9,9 @@
 import AppKit
 import SwiftUI
 import CoreGraphics
+import Carbon
+import Combine
+
 
 
 @MainActor
@@ -26,6 +29,10 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     private let overlayModel = OverlayModel()
     private var overlayController: OverlayController?
     private let swapper = TextSwapService()
+    private let hotKeys = HotKeyCenter()                // NEW
+    private var itemsCancellable: AnyCancellable?       // observe items for UI/hotkey
+    private var hotKeyArmed = false
+
 
 
     private var isCapturing = false {
@@ -41,23 +48,10 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
         overlayController = OverlayController(
             model: overlayModel,
             onReplace: { [weak self] item in
-                guard let self else { return }
-                guard let suggestion = item.replacement?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !suggestion.isEmpty else {
-                    self.logModel.append(.queueInfo("No replacement available for this item."))
-                    return
-                }
-                Task { @MainActor in
-                    if !self.swapper.ensureAccessibility(prompt: true) {
-                        self.logModel.append(.queueInfo("Accessibility permission required to replace text. Enable in System Settings → Privacy & Security → Accessibility."))
-                        return
-                    }
-                    let ok = await self.swapper.replaceLastOccurrence(original: item.chunk, with: suggestion)
-                    self.logModel.append(.queueInfo(ok ? "✓ Replaced text in the active field." :
-                                                         "Replace failed (control may block selection; try selecting manually)."))
-                }
+                self?.performReplace(for: item)
             }
         )
+
         captureService.delegate = self
         updateStatusIcon()
         rebuildMenu()
@@ -65,6 +59,79 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
         let s = OutboxSender(queue: queue, client: client, logModel: logModel, overlay: overlayModel)
         s.start()
         sender = s
+        
+//        let keyCode: UInt32 = UInt32(kVK_Tab)
+//        let mods: UInt32 = 0  // plain TAB, no modifiers
+//        hotKeys.register(keyCode: keyCode, modifiers: mods) { [weak self] in
+//            guard let self else { return }
+//            // Prefer the newest corrected item
+//            if let item = self.newestCorrectedItem() {
+//                self.performReplace(for: item)
+//            } else {
+//                self.logModel.append(.queueInfo("No correction to apply."))
+//            }
+//        }
+        // Observe overlay items: (a) resize overlay; (b) arm/disarm TAB dynamically.
+        itemsCancellable = overlayModel.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.overlayController?.reposition()
+                self.armTabHotKeyIfNeeded()
+            }
+        
+        // Initial evaluation
+        armTabHotKeyIfNeeded()
+
+    }
+    
+    private func performReplace(for item: OverlayModel.Item) {
+        guard let suggestion = item.replacement?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !suggestion.isEmpty else {
+            self.logModel.append(.queueInfo("No replacement available for this item."))
+            return
+        }
+        Task { @MainActor in
+            if !self.swapper.ensureAccessibility(prompt: true) {
+                self.logModel.append(.queueInfo("Accessibility permission required to replace text. Enable in System Settings → Privacy & Security → Accessibility."))
+                return
+            }
+            let ok = await self.swapper.replaceLastOccurrence(original: item.chunk, with: suggestion)
+            if ok {
+                // Flip to Verified; $items sink will also disarm TAB and resize overlay.
+                self.overlayModel.markApplied(id: item.id)
+                self.logModel.append(.queueInfo("✓ Replaced text in the active field."))
+            } else {
+                self.logModel.append(.queueInfo("Replace failed (control may block selection; try selecting manually)."))
+            }
+
+        }
+    }
+    
+    /// Arm TAB only when a correction exists; otherwise let TAB behave normally.
+    private func armTabHotKeyIfNeeded() {
+        let shouldArm = (newestCorrectedItem() != nil)
+        switch (shouldArm, hotKeyArmed) {
+        case (true, false):
+            let keyCode: UInt32 = UInt32(kVK_Tab)
+            hotKeys.register(keyCode: keyCode, modifiers: 0) { [weak self] in
+                guard let self else { return }
+                if let item = self.newestCorrectedItem() {
+                    self.performReplace(for: item)
+                }
+            }
+            hotKeyArmed = true
+        case (false, true):
+            hotKeys.unregister()
+            hotKeyArmed = false
+        default:
+            break
+        }
+    }
+
+    
+    private func newestCorrectedItem() -> OverlayModel.Item? {
+        overlayModel.items.first(where: { $0.verdict == .corrected && ($0.replacement?.isEmpty == false) })
     }
 
     private func updateStatusIcon() {
@@ -207,6 +274,7 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     @objc private func quit() {
         captureService.shutdown()
         sender?.stop()
+        hotKeys.unregister()
         NSApp.terminate(nil)
     }
     // MARK: - KeyCaptureServiceDelegate

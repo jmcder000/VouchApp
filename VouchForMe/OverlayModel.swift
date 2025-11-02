@@ -63,9 +63,20 @@ final class OverlayModel: ObservableObject {
     /// Apply analyzer result; update verdict and replacement.
     func applyResult(id: String, replacementChunk: String?) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
-        items[idx].replacement = replacementChunk?.nilIfBlank
-        items[idx].verdict = (items[idx].replacement == nil) ? .verified : .corrected
+        var item = items[idx]
+        item.replacement = replacementChunk?.nilIfBlank
+        item.verdict = (item.replacement == nil) ? .verified : .corrected
+        items[idx] = item  // reassign to publish change
     }
+    
+    func markApplied(id: String) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        var item = items[idx]
+        item.replacement = nil
+        item.verdict = .verified
+        items[idx] = item  // publish
+    }
+
 }
 
 private extension String {
