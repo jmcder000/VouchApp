@@ -19,6 +19,7 @@ final class OutboxSender {
     private let queue: LocalQueue
     private let client: AnalysisClient
     private weak var logModel: LogModel?
+    private weak var overlay: OverlayModel?
     private var task: Task<Void, Never>?
     private var running = false
     private var attemptsByURL: [URL: Int] = [:]
@@ -30,10 +31,11 @@ final class OutboxSender {
     private let maxAttemptsPerItem: Int = 6
 
 
-    init(queue: LocalQueue, client: AnalysisClient, logModel: LogModel) {
+    init(queue: LocalQueue, client: AnalysisClient, logModel: LogModel, overlay: OverlayModel) {
         self.queue = queue
         self.client = client
         self.logModel = logModel
+        self.overlay = overlay
     }
 
     func start() {
@@ -79,30 +81,41 @@ final class OutboxSender {
                 }
                 do {
                     let reqId = url.lastPathComponent
-                    _ = try await self.client.postPayload(payload, requestId: reqId)
+                    
+                    
+                    let (parsed, _) = try await self.client.submitForResult(payload, requestId: reqId)
                     self.queue.remove(url)
                     self.attemptsByURL[url] = nil
+
                     await MainActor.run { [weak self] in
                         guard let self else { return }
                         self.logModel?.append(.queueInfo("✓ Sent (queue=\(self.queue.count))"))
+                        // Update overlay verdict/correction
+                        self.overlay?.applyResult(id: reqId, replacementChunk: parsed?.replacementChunk)
                     }
-                    backoff = self.minBackoff // reset on success
+                    backoff = self.minBackoff
                 } catch {
                     let nsErr = error as NSError
-                    var desc = nsErr.localizedDescription
-                    if let urlErr = error as? URLError {
-                        desc = "URLError(\(urlErr.code.rawValue)) \(urlErr.localizedDescription)"
-                    }
+                    let desc: String = {
+                        if let urlErr = error as? URLError {
+                            return "URLError(\(urlErr.code.rawValue)) \(urlErr.localizedDescription)"
+                        } else {
+                            return nsErr.localizedDescription
+                        }
+                    }()
                     
                     // Increment attempts and decide whether to dead-letter
                     let attempts = (self.attemptsByURL[url] ?? 0) + 1
                     self.attemptsByURL[url] = attempts
+                    let maxA = self.maxAttemptsPerItem
+                    let failMsg = "Send failed [attempt \(attempts)/\(maxA)]: \(desc)"
                     await MainActor.run { [weak self] in
-                        self?.logModel?.append(.queueInfo("Send failed [attempt \(attempts)/\(self?.maxAttemptsPerItem ?? 0)]: \(desc)"))
+                        self?.logModel?.append(.queueInfo(failMsg))
                     }
                     if attempts >= self.maxAttemptsPerItem {
+                        let deadMsg = "❗️Permanently failing item after \(attempts) attempts → moving to Dead Letters"
                         await MainActor.run { [weak self] in
-                            self?.logModel?.append(.queueInfo("❗️Permanently failing item after \(attempts) attempts → moving to Dead Letters"))
+                            self?.logModel?.append(.queueInfo(deadMsg))
                         }
                         self.queue.moveToDead(url, completion: nil)
                         self.attemptsByURL[url] = nil
@@ -135,11 +148,13 @@ final class OutboxSender {
                 let data = try Data(contentsOf: url)
                 let payload = try JSONDecoder().decode(AnalysisPayload.self, from: data)
                 let reqId = url.lastPathComponent
-                _ = try await client.postPayload(payload, requestId: reqId)
-
+                               
+                let (parsed, _) = try await client.submitForResult(payload, requestId: reqId)
                 queue.remove(url)
                 attemptsByURL[url] = nil
-
+                await MainActor.run { [weak self] in
+                    self?.overlay?.applyResult(id: reqId, replacementChunk: parsed?.replacementChunk)
+                }
                 sent += 1
             } catch {
                 // If manual send fails repeatedly, respect the same ceiling.

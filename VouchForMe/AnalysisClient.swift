@@ -7,6 +7,11 @@
 
 import Foundation
 
+struct AnalysisServerResponse: Codable {
+    let replacementChunk: String?
+}
+
+
 struct AnalysisClientConfig {
     let baseURL: URL     // e.g. http://127.0.0.1:3000
     let timeoutSeconds: TimeInterval
@@ -74,4 +79,29 @@ final class AnalysisClient {
             return false
         }
     }
+    
+    func submitForResult(_ payload: AnalysisPayload, requestId: String? = nil)
+        async throws -> (AnalysisServerResponse?, HTTPURLResponse)
+    {
+        let url = cfg.baseURL.appendingPathComponent("analyze")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = cfg.timeoutSeconds
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        if let requestId { req.setValue(requestId, forHTTPHeaderField: "X-Request-Id") }
+        req.httpBody = try encoder.encode(payload)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "AnalysisClient", code: http.statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: "Server \(http.statusCode): \(body)"])
+        }
+
+        // Try strict decode. If analyzer is in Metorial mode (freeform text), this will fail -> nil.
+        let parsed = try? JSONDecoder().decode(AnalysisServerResponse.self, from: data)
+        return (parsed, http)
+    }
+
 }

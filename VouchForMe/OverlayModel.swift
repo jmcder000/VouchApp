@@ -1,3 +1,11 @@
+//
+//  OverlayModel.swift
+//  VouchForMe
+//
+//  Created by Josh Mcdermott Sonoma on 11/2/25.
+//
+
+
 import Foundation
 import SwiftUI
 

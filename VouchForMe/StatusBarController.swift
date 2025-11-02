@@ -11,7 +11,7 @@ import SwiftUI
 import CoreGraphics
 
 
-
+@MainActor
 final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     private let statusItem: NSStatusItem
     private var permissionsWindow: NSWindow?
@@ -23,19 +23,26 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     private let queue = LocalQueue()
     private let client = AnalysisClient()               // NEW: Phase 4.5 HTTP client
     private var sender: OutboxSender?
+    private let overlayModel = OverlayModel()
+    private var overlayController: OverlayController?
+
 
     private var isCapturing = false {
-        didSet { rebuildMenu(); updateStatusIcon() }
+        didSet {
+            rebuildMenu();updateStatusIcon()
+            overlayController?.toggle(isCapturing)   // <-- show when ON, hide when OFF
+        }
     }
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
+        overlayController = OverlayController(model: overlayModel)
         captureService.delegate = self
         updateStatusIcon()
         rebuildMenu()
         // Start background sender loop
-        let s = OutboxSender(queue: queue, client: client, logModel: logModel)
+        let s = OutboxSender(queue: queue, client: client, logModel: logModel, overlay: overlayModel)
         s.start()
         sender = s
     }
@@ -185,37 +192,46 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     // MARK: - KeyCaptureServiceDelegate
 
     func keyCaptureService(_ service: KeyCaptureService, didCaptureChunk text: String) {
-         // Always show raw chunk quickly
-         logModel.append(.chunk(text))
-       
-        // Capture window context if permitted, then build + enqueue payload.
-        Task { [weak self] in
+        // Log immediately
+        logModel.append(.chunk(text))
+
+        // Run the whole flow on the MainActor so UI + ScreenCaptureKit (@MainActor) are happy
+        Task { @MainActor [weak self] in
             guard let self else { return }
-       
-            // We can always get front app info, even if screenshots aren't permitted.
-            let front = await MainActor.run { NSWorkspace.shared.frontmostApplication }
+
+            // Active window/app (header for overlay)
+            let front = NSWorkspace.shared.frontmostApplication
             let frontName = front?.localizedName ?? (front?.bundleIdentifier ?? "App")
             let frontBundle = front?.bundleIdentifier
-       
+
             var snapshot: WindowSnapshot? = nil
             if CGPreflightScreenCaptureAccess() {
                 do {
+                    // ScreenCaptureService.captureFrontmostWindow() is @MainActor
                     snapshot = try await self.screenCapture.captureFrontmostWindow()
                 } catch {
-                    // Log capture error but keep building payload without screenshot.
                     self.logModel.append(.queueInfo("Window capture error: \(error.localizedDescription)"))
                 }
             }
-       
+
+            // Keep header up to date
+            self.overlayModel.setActiveWindow(
+                appName: frontName,
+                windowTitle: snapshot?.windowTitle ?? ""
+            )
+
+            // Build payload
             let payload = AnalysisPayload.make(
                 typedText: text,
                 frontAppName: frontName,
                 frontBundleId: frontBundle,
                 snapshot: snapshot
             )
-       
-            // Enqueue to disk; log a friendly preview + any drop info.
-            self.queue.enqueue(payload) { result in
+
+            // Enqueue and update overlay with a pending card (id = queued filename)
+            self.queue.enqueue(payload) { [weak self] result in
+                guard let self else { return }
+
                 let preview = PayloadPreview(
                     appName: payload.app.name,
                     windowTitle: payload.window?.title ?? "",
@@ -226,9 +242,22 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
                 if result.droppedCount > 0 {
                     self.logModel.append(.queueInfo("Dropped \(result.droppedCount) oldest payload(s) (queue full)."))
                 }
+
+                // Show "Checking…" immediately for this chunk
+                let id = result.url.lastPathComponent
+                self.overlayModel.upsertPending(
+                    id: id,
+                    appName: payload.app.name,
+                    windowTitle: payload.window?.title ?? "",
+                    chunk: payload.typedTextChunk
+                )
+
+                self.overlayController?.reposition() // keep overlay tucked in TR corner
+
             }
         }
     }
+
 
     func keyCaptureService(_ service: KeyCaptureService, secureInputStatusChanged isSecure: Bool) {
         logModel.append(.secure(isSecure))

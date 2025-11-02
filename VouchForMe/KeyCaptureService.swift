@@ -4,6 +4,7 @@ import CoreGraphics
 import Carbon
 // import AppKit  // Not needed; avoid AppKit on the tap thread
 
+@MainActor
 protocol KeyCaptureServiceDelegate: AnyObject {
     func keyCaptureService(_ service: KeyCaptureService, didCaptureChunk text: String)
     func keyCaptureService(_ service: KeyCaptureService, secureInputStatusChanged isSecure: Bool)
@@ -354,16 +355,10 @@ final class KeyCaptureService {
 
 
 
-        let deliver = { [weak self] in
-
+        Task { @MainActor [weak self] in
             guard let self else { return }
-
             self.delegate?.keyCaptureService(self, didCaptureChunk: normalized)
-
         }
-
-        if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
-
     }
 
 
@@ -395,13 +390,12 @@ final class KeyCaptureService {
             // Auto-stop after extended idle (default: 5 minutes)
 
             if let cutoff = self.autoStopAfterIdle, idle >= cutoff {
-
                 self.stopCapture()
-
                 // Notify UI so it can update the icon/menu state
-
-                self.delegate?.keyCaptureServiceDidAutoStop(self)
-
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.delegate?.keyCaptureServiceDidAutoStop(self)
+                }
             }
 
         }
@@ -426,16 +420,10 @@ final class KeyCaptureService {
 
             isSecureInputActive = nowSecure
 
-            let notify = { [weak self] in
-
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-
                 self.delegate?.keyCaptureService(self, secureInputStatusChanged: nowSecure)
-
             }
-
-            if Thread.isMainThread { notify() } else { DispatchQueue.main.async(execute: notify) }
-
         }
 
     }
@@ -448,15 +436,10 @@ final class KeyCaptureService {
 
             isSecureInputActive = true
 
-            let notify = { [weak self] in
-
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-
                 self.delegate?.keyCaptureService(self, secureInputStatusChanged: true)
-
             }
-
-            if Thread.isMainThread { notify() } else { DispatchQueue.main.async(execute: notify) }
 
         }
 

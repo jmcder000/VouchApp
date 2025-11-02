@@ -1,6 +1,15 @@
+//
+//  OverlayController.swift
+//  VouchForMe
+//
+//  Created by Josh Mcdermott Sonoma on 11/2/25.
+//
+
+
 import AppKit
 import SwiftUI
 
+@MainActor
 final class OverlayController {
     private let model: OverlayModel
     private var hosting: NSHostingController<OverlayView>!
