@@ -11,6 +11,7 @@ import SwiftUI
 struct OverlayView: View {
     @ObservedObject var model: OverlayModel
     let onClose: (() -> Void)?
+    let onReplace: ((OverlayModel.Item) -> Void)?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -19,7 +20,7 @@ struct OverlayView: View {
                 emptyState
             } else {
                 ForEach(model.items) { item in
-                    ChunkCard(item: item)
+                    ChunkCard(item: item, onReplace: onReplace)
                 }
             }
         }
@@ -83,35 +84,58 @@ struct OverlayView: View {
 
 private struct ChunkCard: View {
     let item: OverlayModel.Item
+    let onReplace: ((OverlayModel.Item) -> Void)?
 
-    var badge: some View {
+    // Unify types used by modifiers so the underlying view type is identical in all cases
+    private var badgeTitle: String {
         switch item.verdict {
-        case .checking:
-            return Label("Checking", systemImage: "ellipsis")
-                .labelStyle(.titleAndIcon)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.gray.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
-        case .verified:
-            return Label("Verified", systemImage: "checkmark.seal.fill")
-                .labelStyle(.titleAndIcon)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(LinearGradient(colors: [.green.opacity(0.3), .green.opacity(0.15)],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing), in: Capsule())
-                .foregroundStyle(.green)
-        case .corrected:
-            return Label("Correction", systemImage: "pencil.and.scribble")
-                .labelStyle(.titleAndIcon)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(LinearGradient(colors: [.pink.opacity(0.35), .pink.opacity(0.15)],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing), in: Capsule())
-                .foregroundStyle(.pink)
+        case .checking:  return "Checking"
+        case .verified:  return "Verified"
+        case .corrected: return "Correction"
         }
     }
-
+    private var badgeIcon: String {
+        switch item.verdict {
+        case .checking:  return "ellipsis"
+        case .verified:  return "checkmark.seal.fill"
+        case .corrected: return "pencil.and.scribble"
+        }
+    }
+    private var badgeForeground: Color {
+        switch item.verdict {
+        case .checking:  return .secondary
+        case .verified:  return .green
+        case .corrected: return .pink
+        }
+    }
+    private var badgeBackground: LinearGradient {
+        switch item.verdict {
+        case .checking:
+            return LinearGradient(
+                colors: [Color.gray.opacity(0.15), Color.gray.opacity(0.15)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .verified:
+            return LinearGradient(
+                colors: [Color.green.opacity(0.3), Color.green.opacity(0.15)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .corrected:
+            return LinearGradient(
+                colors: [Color.pink.opacity(0.35), Color.pink.opacity(0.15)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        }
+    }
+    var badge: some View {
+        Label(badgeTitle, systemImage: badgeIcon)
+            .labelStyle(.titleAndIcon)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(badgeBackground, in: Capsule())
+            .foregroundStyle(badgeForeground)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // First row: indicator + time
@@ -149,6 +173,19 @@ private struct ChunkCard: View {
                             .font(.callout.weight(.semibold))
                             .foregroundStyle(.primary)
                             .lineLimit(3)
+                    }
+                    HStack(spacing: 8) {
+                        if let onReplace {
+                            Button {
+                                onReplace(item)
+                            } label: {
+                                Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                                    .labelStyle(.titleAndIcon)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .help("Replace the original text with the suggestion")
+                        }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }

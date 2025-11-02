@@ -25,6 +25,7 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     private var sender: OutboxSender?
     private let overlayModel = OverlayModel()
     private var overlayController: OverlayController?
+    private let swapper = TextSwapService()
 
 
     private var isCapturing = false {
@@ -37,7 +38,26 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
-        overlayController = OverlayController(model: overlayModel)
+        overlayController = OverlayController(
+            model: overlayModel,
+            onReplace: { [weak self] item in
+                guard let self else { return }
+                guard let suggestion = item.replacement?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !suggestion.isEmpty else {
+                    self.logModel.append(.queueInfo("No replacement available for this item."))
+                    return
+                }
+                Task { @MainActor in
+                    if !self.swapper.ensureAccessibility(prompt: true) {
+                        self.logModel.append(.queueInfo("Accessibility permission required to replace text. Enable in System Settings → Privacy & Security → Accessibility."))
+                        return
+                    }
+                    let ok = await self.swapper.replaceLastOccurrence(original: item.chunk, with: suggestion)
+                    self.logModel.append(.queueInfo(ok ? "✓ Replaced text in the active field." :
+                                                         "Replace failed (control may block selection; try selecting manually)."))
+                }
+            }
+        )
         captureService.delegate = self
         updateStatusIcon()
         rebuildMenu()

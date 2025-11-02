@@ -14,17 +14,23 @@ final class OverlayController {
     private let model: OverlayModel
     private var hosting: NSHostingController<OverlayView>!
     private var panel: NSPanel!
+    private var onReplace: ((OverlayModel.Item) -> Void)?   // NEW
 
-    init(model: OverlayModel) {
+
+    init(model: OverlayModel, onReplace: ((OverlayModel.Item) -> Void)? = nil) {
         self.model = model
+        self.onReplace = onReplace
         configurePanel()
     }
 
     private func configurePanel() {
-        hosting = NSHostingController(rootView: OverlayView(model: model, onClose: { [weak self] in
-            self?.hide()
-        }))
-
+        hosting = NSHostingController(
+            rootView: OverlayView(
+                model: model,
+                onClose: { [weak self] in self?.hide() },
+                onReplace: { [weak self] item in self?.onReplace?(item) } // NEW
+            )
+        )
         // Non-activating, floating, transparent panel
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
                         styleMask: [.nonactivatingPanel, .hudWindow],
