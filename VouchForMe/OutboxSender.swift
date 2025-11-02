@@ -21,10 +21,14 @@ final class OutboxSender {
     private weak var logModel: LogModel?
     private var task: Task<Void, Never>?
     private var running = false
+    private var attemptsByURL: [URL: Int] = [:]
+
 
     // Backoff settings
     private let minBackoff: TimeInterval = 1
     private let maxBackoff: TimeInterval = 60
+    private let maxAttemptsPerItem: Int = 6
+
 
     init(queue: LocalQueue, client: AnalysisClient, logModel: LogModel) {
         self.queue = queue
@@ -74,20 +78,40 @@ final class OutboxSender {
                     self.logModel?.append(.queueInfo("Sending 1 payload… (queue=\(self.queue.count))"))
                 }
                 do {
-                    _ = try await self.client.postPayload(payload)
+                    let reqId = url.lastPathComponent
+                    _ = try await self.client.postPayload(payload, requestId: reqId)
                     self.queue.remove(url)
+                    self.attemptsByURL[url] = nil
                     await MainActor.run { [weak self] in
                         guard let self else { return }
                         self.logModel?.append(.queueInfo("✓ Sent (queue=\(self.queue.count))"))
                     }
                     backoff = self.minBackoff // reset on success
                 } catch {
-                    let desc = (error as NSError).localizedDescription
+                    let nsErr = error as NSError
+                    var desc = nsErr.localizedDescription
+                    if let urlErr = error as? URLError {
+                        desc = "URLError(\(urlErr.code.rawValue)) \(urlErr.localizedDescription)"
+                    }
+                    
+                    // Increment attempts and decide whether to dead-letter
+                    let attempts = (self.attemptsByURL[url] ?? 0) + 1
+                    self.attemptsByURL[url] = attempts
                     await MainActor.run { [weak self] in
-                        self?.logModel?.append(.queueInfo("Send failed: \(desc). Retrying…"))
+                        self?.logModel?.append(.queueInfo("Send failed [attempt \(attempts)/\(self?.maxAttemptsPerItem ?? 0)]: \(desc)"))
+                    }
+                    if attempts >= self.maxAttemptsPerItem {
+                        await MainActor.run { [weak self] in
+                            self?.logModel?.append(.queueInfo("❗️Permanently failing item after \(attempts) attempts → moving to Dead Letters"))
+                        }
+                        self.queue.moveToDead(url, completion: nil)
+                        self.attemptsByURL[url] = nil
+                        backoff = self.minBackoff
+                        continue
                     }
                     // Exponential backoff
-                    let delay = UInt64(backoff * 1_000_000_000)
+                    let jitter = Double.random(in: 0...(backoff * 0.3))
+                    let delay = UInt64((backoff + jitter) * 1_000_000_000)
                     try? await Task.sleep(nanoseconds: delay)
                     backoff = min(backoff * 2, self.maxBackoff)
                 }
@@ -110,10 +134,21 @@ final class OutboxSender {
             do {
                 let data = try Data(contentsOf: url)
                 let payload = try JSONDecoder().decode(AnalysisPayload.self, from: data)
-                _ = try await client.postPayload(payload)
+                let reqId = url.lastPathComponent
+                _ = try await client.postPayload(payload, requestId: reqId)
+
                 queue.remove(url)
+                attemptsByURL[url] = nil
+
                 sent += 1
             } catch {
+                // If manual send fails repeatedly, respect the same ceiling.
+                let attempts = (attemptsByURL[url] ?? 0) + 1
+                attemptsByURL[url] = attempts
+                if attempts >= maxAttemptsPerItem {
+                    queue.moveToDead(url, completion: nil)
+                    attemptsByURL[url] = nil
+                }
                 break
             }
         }

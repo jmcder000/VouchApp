@@ -28,6 +28,7 @@ final class LocalQueue {
 
     private let io = DispatchQueue(label: "VouchForMe.LocalQueue.io")
     private let dir: URL
+    private let deadDir: URL
     private(set) var pending: [URL] = []        // in-memory index of files sorted oldest→newest
     private let encoder = JSONEncoder()
 
@@ -40,9 +41,10 @@ final class LocalQueue {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let base = appSupport.appendingPathComponent("VouchForMe", isDirectory: true)
         self.dir = base.appendingPathComponent("OutboundQueue", isDirectory: true)
-
+        self.deadDir = base.appendingPathComponent("OutboundQueueDead", isDirectory: true)
         io.sync {
             try? FileManager.default.createDirectory(at: self.dir, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: self.deadDir, withIntermediateDirectories: true)
             self.reloadIndex()
         }
     }
@@ -125,7 +127,49 @@ final class LocalQueue {
             }
         }
     }
+    
+    func moveToDead(_ url: URL, completion: ((Bool) -> Void)? = nil) {
+        io.async {
+            let dest = self.deadDir.appendingPathComponent(url.lastPathComponent)
+            var ok = false
+            do {
+                // If a file already exists in deadDir with same name, remove it first.
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    try FileManager.default.removeItem(at: dest)
+                }
+                try FileManager.default.moveItem(at: url, to: dest)
+                ok = true
+            } catch {
+                ok = false
+            }
+            if let i = self.pending.firstIndex(of: url) {
+                self.pending.remove(at: i)
+            }
+            DispatchQueue.main.async { completion?(ok) }
+        }
+    }
+
 
     /// Current count of spooled payloads
     var count: Int { io.sync { pending.count } }
+    
+    /// Removes all queued payload files from disk and clears in-memory index.
+    /// Calls `completion` on the main queue with the number of items removed.
+    func clearAll(completion: ((Int) -> Void)? = nil) {
+        io.async {
+            var removed = 0
+            // Remove any json files in the directory (not just those in memory)
+            let items = (try? FileManager.default.contentsOfDirectory(at: self.dir, includingPropertiesForKeys: nil)) ?? []
+            for u in items where u.pathExtension.lowercased() == "json" {
+                if (try? FileManager.default.removeItem(at: u)) != nil {
+                    removed += 1
+                }
+            }
+            self.pending.removeAll()
+            DispatchQueue.main.async {
+                completion?(removed)
+            }
+        }
+    }
+
 }

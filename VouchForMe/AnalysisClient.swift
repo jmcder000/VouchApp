@@ -12,7 +12,7 @@ struct AnalysisClientConfig {
     let timeoutSeconds: TimeInterval
 
     init(baseURL: URL = URL(string: "http://127.0.0.1:3000")!,
-         timeoutSeconds: TimeInterval = 30) {
+         timeoutSeconds: TimeInterval = 120) {
         self.baseURL = baseURL
         self.timeoutSeconds = timeoutSeconds
     }
@@ -38,12 +38,17 @@ final class AnalysisClient {
 
     /// POSTs a payload to /analyze. Throws on transport or non-2xx responses.
     @discardableResult
-    func postPayload(_ payload: AnalysisPayload) async throws -> HTTPURLResponse {
+    func postPayload(_ payload: AnalysisPayload, requestId: String? = nil) async throws -> HTTPURLResponse {
         let url = cfg.baseURL.appendingPathComponent("analyze")
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.timeoutInterval = cfg.timeoutSeconds
+
         req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        if let requestId {
+            req.setValue(requestId, forHTTPHeaderField: "X-Request-Id")
+        }
         req.httpBody = try encoder.encode(payload)
 
         let (data, resp) = try await session.data(for: req)

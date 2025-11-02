@@ -74,6 +74,10 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
         let sendNowItem = NSMenuItem(title: "Send Queue Now", action: #selector(sendQueueNow), keyEquivalent: "")
         sendNowItem.target = self
         menu.addItem(sendNowItem)
+        
+        let clearItem = NSMenuItem(title: "Clear Queue…", action: #selector(clearQueue), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -120,6 +124,24 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
                     alert.runModal()
                 }
             }
+        }
+    }
+    
+    @objc private func clearQueue() {
+        let alert = NSAlert()
+        alert.messageText = "Clear All Queued Payloads?"
+        alert.informativeText = "This will remove all pending payload files from disk. This cannot be undone."
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+    
+        // Pause sender to avoid races, clear, then resume.
+        sender?.stop()
+        queue.clearAll { [weak self] removed in
+            guard let self else { return }
+            self.logModel.append(.queueInfo("Cleared queue (\(removed) item(s))."))
+            self.sender?.start()
         }
     }
 
