@@ -226,7 +226,6 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
                 if result.droppedCount > 0 {
                     self.logModel.append(.queueInfo("Dropped \(result.droppedCount) oldest payload(s) (queue full)."))
                 }
-                Task { [weak self] in _ = await self?.sender?.processOnce(limit: 1) }
             }
         }
     }
@@ -239,7 +238,10 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     @objc private func sendQueueNow() {
         Task { [weak self] in
             guard let self else { return }
+            // Pause background loop to avoid races with manual send
+            self.sender?.stop()
             let sent = await self.sender?.processOnce(limit: 10) ?? 0
+            self.sender?.start()
             self.logModel.append(.queueInfo("Manual send: \(sent) item(s)"))
         }
     }

@@ -22,6 +22,17 @@ fs.mkdirSync(shotsDir, { recursive: true });
 
 const PORT = process.env.PORT || 3000;
 
+const seenRequests = new Map(); // id -> timestamp(ms)
+const DEDUPE_TTL_MS = 60_000;
+function isDuplicate(id) {
+  if (!id) return false;
+  const now = Date.now();
+  const t = seenRequests.get(id);
+  if (t && now - t < DEDUPE_TTL_MS) return true;
+  seenRequests.set(id, now);
+  return false;
+}
+
 // --- Global mode flag: swap between Metorial (tools) and OpenAI-only ---
 const USE_METORIAL = String(process.env.USE_METORIAL || "").toLowerCase() === "true";
 
@@ -124,7 +135,9 @@ async function openaiReplacementOnly(payload) {
     response_format: zodResponseFormat(AnalysisSchemaReplacementOnly, "ChunkCorrection")
   });
   // `.parsed` is validated by zodResponseFormat
+  console.log(JSON.stringify(completion))
   const parsed = completion.choices[0].message.parsed;
+  console.log(parsed)
   // Ensure final object shape
   console.log("final response " + parsed?.replacementChunk)
   return { replacementChunk: parsed?.replacementChunk ?? null };
@@ -133,6 +146,11 @@ async function openaiReplacementOnly(payload) {
 
 
 app.post("/analyze", async (req, res) => {
+  const reqId = req.get("X-Request-Id") || null;
+  if (isDuplicate(reqId)) {
+    console.log(`(duplicate) X-Request-Id=${reqId} — ignored`);
+    return res.status(200).json({ ok: true, duplicate: true });
+  }
   const p = req.body; // AnalysisPayload
   const t0 = performance.now();
   // Always print summary + save screenshot (carryover from Phase 4.5)

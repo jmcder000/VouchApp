@@ -53,7 +53,7 @@ final class OutboxSender {
             while !Task.isCancelled && self.running {
                 // Peek first; if nothing to do, idle briefly.
                 guard let url = self.queue.peekNext() else {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: 250_000_000) // 250ms
                     continue
                 }
                 // Read & decode inside a synchronous autoreleasepool
