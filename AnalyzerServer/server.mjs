@@ -99,8 +99,12 @@ CONTEXT:
 TASK:
 1) Determine the most relevant sources of data for the user text and the context of the window title.
 2) Using the available MCP servers (provided to you), iteratively gather supporting/contradictory context.
+3) If the available data implies an error in the text, you must output a corrected version of the text.
+4) If the available data implies there is no error in the text, you must output null or the empty string. 
 
-Never ask for confirmation, simply gather the best context you can.`
+Never ask for confirmation.
+
+YOUR FINAL OUTPUT MUST EITHER BE NULL/'' OR THE CORRECTED USER TEXT:`
 }
 
 function buildPromptOpenAI(payload) {
@@ -214,10 +218,11 @@ app.post("/analyze", async (req, res) => {
       });
       const tLLMTools1 = performance.now();
       const t1 = performance.now();
-      const toolText = resultTools?.text ?? "";
-      console.log("toolResp:", toolText);
+      const toolOut = (!resultTools.text || resultTools.text==="" || resultTools.text==="null") ? null :resultTools.text;
+      console.log("toolResp:", toolOut);
       console.log(`Timing(metorial): LLM ${(tLLMTools1 - tLLMTools0).toFixed(0)} ms | total ${(t1 - t0).toFixed(0)} ms`);
-      return res.status(200).json(toolText);
+      const response = { replacementChunk: toolOut ?? null };
+      return res.status(200).json(response);
     }
   } catch (err) {
     console.error("Analyze error:", err);
