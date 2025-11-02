@@ -1,0 +1,20 @@
+{
+  "name": "analyzerserver",
+  "version": "1.0.0",
+  "description": "The server for processing Vouch language model calls",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.mjs"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "metorial": "^1.0.3",
+    "openai": "^6.7.0"
+  }
+}
