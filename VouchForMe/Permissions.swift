@@ -71,7 +71,8 @@ struct PermissionRow: View {
 final class PermissionManager: ObservableObject {
     @Published var inputMonitoring: PermissionStatus = .unknown
     @Published var screenRecording: PermissionStatus = .unknown
-
+    @Published var accessibility: PermissionStatus = .unknown
+    
     init() {
         refreshAll()
     }
@@ -79,6 +80,7 @@ final class PermissionManager: ObservableObject {
     func refreshAll() {
         inputMonitoring = checkInputMonitoring()
         screenRecording = checkScreenRecording()
+        accessibility    = checkAccessibility()
     }
 
     // === Input Monitoring ===
@@ -126,6 +128,21 @@ final class PermissionManager: ObservableObject {
     func openScreenRecordingPane() {
         openPrivacyPane(anchor: "Privacy_ScreenCapture")
     }
+    
+    // === Accessibility (NEW) ===
+    func checkAccessibility() -> PermissionStatus {
+        return AXIsProcessTrusted() ? .granted : .denied
+    }
+    
+    func requestAccessibility() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
+        let options: CFDictionary = [key: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+    
+    func openAccessibilityPane() {
+        openPrivacyPane(anchor: "Privacy_Accessibility")
+    }
 
     // === Utilities ===
     private func openPrivacyPane(anchor: String) {
@@ -164,6 +181,16 @@ struct PermissionsView: View {
                 onOpenSettings: { pm.openScreenRecordingPane() },
                 onRecheck: { pm.refreshAll() }
             )
+            
+            PermissionRow(  // NEW
+                title: "Accessibility",
+                status: pm.accessibility,
+                description: "Allows this app to read text positions in other apps’ text fields to draw guidance overlays (no injection/modification).",
+                onRequest: { pm.requestAccessibility() },
+                onOpenSettings: { pm.openAccessibilityPane() },
+                onRecheck: { pm.refreshAll() }
+            )
+
 
             Spacer()
 

@@ -28,6 +28,7 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
     private var sender: OutboxSender?
     private let overlayModel = OverlayModel()
     private var overlayController: OverlayController?
+    private var underlineCoordinator: UnderlineCoordinator?   // NEW
     private let swapper = TextSwapService()
     private let hotKeys = HotKeyCenter()                // NEW
     private var itemsCancellable: AnyCancellable?       // observe items for UI/hotkey
@@ -39,6 +40,7 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
         didSet {
             rebuildMenu();updateStatusIcon()
             overlayController?.toggle(isCapturing)   // <-- show when ON, hide when OFF
+            
         }
     }
 
@@ -51,6 +53,10 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
                 self?.performReplace(for: item)
             }
         )
+        let ants = UnderlineCoordinator(model: overlayModel)
+        ants.start()
+        underlineCoordinator = ants
+
 
         captureService.delegate = self
         updateStatusIcon()
@@ -275,6 +281,7 @@ final class StatusBarController: NSObject, KeyCaptureServiceDelegate {
         captureService.shutdown()
         sender?.stop()
         hotKeys.unregister()
+        underlineCoordinator?.shutdown()
         NSApp.terminate(nil)
     }
     // MARK: - KeyCaptureServiceDelegate
