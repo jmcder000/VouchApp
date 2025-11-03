@@ -35,7 +35,7 @@ function isDuplicate(id) {
 }
 
 // --- Global mode flag: swap between Metorial (tools) and OpenAI-only ---
-const USE_METORIAL = String(process.env.USE_METORIAL || "true").toLowerCase() === "true";
+const USE_METORIAL = String(process.env.USE_METORIAL || "").toLowerCase() === "true";
 
 // --- Metorial + LLM setup ---
 const METORIAL_API_KEY = process.env.METORIAL_API_KEY;
