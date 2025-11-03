@@ -159,9 +159,9 @@ async function openaiReplacementOnly(payload) {
     response_format: zodResponseFormat(AnalysisSchemaReplacementOnly, "ChunkCorrection")
   });
   // `.parsed` is validated by zodResponseFormat
-  console.log(JSON.stringify(completion))
+  // console.log(JSON.stringify(completion))
   const parsed = completion.choices[0].message.parsed;
-  console.log(parsed)
+  // console.log(parsed)
   // Ensure final object shape
   console.log("final response " + parsed?.replacementChunk)
   return { replacementChunk: parsed?.replacementChunk ?? null };
@@ -172,7 +172,7 @@ async function openaiReplacementOnly(payload) {
 app.post("/analyze", async (req, res) => {
   const reqId = req.get("X-Request-Id") || null;
   if (isDuplicate(reqId)) {
-    console.log(`(duplicate) X-Request-Id=${reqId} — ignored`);
+    // console.log(`(duplicate) X-Request-Id=${reqId} - ignored`);
     return res.status(200).json({ ok: true, duplicate: true });
   }
   const p = req.body; // AnalysisPayload
