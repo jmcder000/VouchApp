@@ -11,6 +11,7 @@ import { z } from "zod";
 import { zodResponseFormat } from "openai/helpers/zod.mjs";
 
 
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -34,7 +35,7 @@ function isDuplicate(id) {
 }
 
 // --- Global mode flag: swap between Metorial (tools) and OpenAI-only ---
-const USE_METORIAL = String(process.env.USE_METORIAL || "").toLowerCase() === "true";
+const USE_METORIAL = String(process.env.USE_METORIAL || "true").toLowerCase() === "true";
 
 // --- Metorial + LLM setup ---
 const METORIAL_API_KEY = process.env.METORIAL_API_KEY;
@@ -43,13 +44,31 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const METORIAL_MAX_STEPS = Number(process.env.METORIAL_MAX_STEPS || 12);
 
 // Allow a comma-separated list of server deployments (by ID or name)
+
+
+const metorial = new Metorial({ apiKey: METORIAL_API_KEY });
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+
 const SERVER_DEPLOYMENTS = (process.env.METORIAL_SERVER_DEPLOYMENTS || "")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-const metorial = new Metorial({ apiKey: METORIAL_API_KEY });
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+// Create OAuth sessions for services that require user authentication
+let [googleCalOAuthSession] = await Promise.all([
+  metorial.oauth.sessions.create({ 
+    serverDeploymentId: SERVER_DEPLOYMENTS[0] 
+  }),
+]);
+
+console.log('OAuth URLs for user authentication:');
+console.log(`   Google Calendar: ${googleCalOAuthSession.url}`);
+
+
+await metorial.oauth.waitForCompletion([googleCalOAuthSession]);
+console.log('OAuth sessions completed!');
+
 
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
@@ -211,7 +230,10 @@ app.post("/analyze", async (req, res) => {
       const tLLMTools0 = performance.now();
       const resultTools = await metorial.run({
         message,
-        serverDeployments,
+        serverDeployments:[{ 
+          serverDeploymentId: serverDeployments[0], 
+          oauthSessionId: googleCalOAuthSession.id 
+        }],
         model: OPENAI_MODEL,
         client: openai,
         maxSteps: METORIAL_MAX_STEPS

@@ -50,9 +50,8 @@ final class TextSwapService {
         }
         print("[Swap] focused: \(describe(elem: focused))")
 
-        // 0) Resolve the actual text container (focused leaf may not expose text attributes)
-        guard let elem = resolveTextContainer(start: focused) else {
-            print("[Swap] resolveTextContainer: could not find a text-capable element (down or up)")
+        guard let elem = resolveTextContainer(start: focused) ?? resolveViaWindowAndAppFallback(from: focused) else {
+            print("[Swap] resolveTextContainer: could not find a text-capable element (down/up/window/app)")
             return false
         }
         if elem as CFTypeRef === focused as CFTypeRef {
@@ -62,24 +61,25 @@ final class TextSwapService {
         }
 
         
-        // 1) Read full field text (kAXValue or parameterized range API)
-        guard let (fieldValue, _) = copyFullText(from: elem) else {
+        // 1) Read full/visible field text (kAXValue, kAXNumberOfCharacters, or kAXVisibleCharacterRange)
+        guard let (fieldValue, _, base) = copyFullText(from: elem) else {
             print("[Swap] copyFullText() failed (no kAXValue and parameterized text failed)")
             return false
         }
-        print("[Swap] fullText length = \((fieldValue as NSString).length)")
+        print("[Swap] fullText length = \((fieldValue as NSString).length)  baseOffset=\(base)")
 
-        return await replaceInValue(fieldValue, in: elem, original: original, replacement: replacement)    }
+        return await replaceInValue(fieldValue, in: elem, baseOffset: base, original: original, replacement: replacement)  }
 
     // MARK: - Internals
 
-    private func replaceInValue(_ value: String, in elem: AXUIElement, original: String, replacement: String) async -> Bool {
+    private func replaceInValue(_ value: String, in elem: AXUIElement, baseOffset: Int, original: String, replacement: String) async -> Bool {
         // 2) Find last occurrence using normalized mapping
         guard let targetRange = normalizedBackMappedRange(of: original, in: value) else {
             print("[Swap] normalizedBackMappedRange() failed — couldn't locate chunk in field")
             return false
         }
-        print("[Swap] targetRange = \(targetRange.location)..<\(targetRange.location+targetRange.length)")
+        let absRange = NSRange(location: baseOffset + targetRange.location, length: targetRange.length)
+        print("[Swap] targetRange (local) = \(targetRange.location)..<\(targetRange.location+targetRange.length)  abs=\(absRange.location)..<\(absRange.location+absRange.length)")
         
         // 2.5) Make sure the owning application is on top (keystrokes go to it)
         print("[Swap] raising owning application…")
@@ -89,7 +89,7 @@ final class TextSwapService {
 
         // 3) Try to set selection range to the target
         print("[Swap] setSelectedTextRange() attempting…")
-        if !setSelectedTextRange(elem, targetRange) {
+        if !setSelectedTextRange(elem, absRange) {
             print("[Swap] setSelectedTextRange() returned false, trying kAXValue replacement fallback")
             // As a coarse fallback (simple text fields): set the whole value (keeps selection logic minimal)
             let ns = value as NSString
@@ -106,7 +106,7 @@ final class TextSwapService {
         // Briefly yield so the target app can process the event before we verify
         try? await Task.sleep(nanoseconds: 60_000_000) // 60ms
         
-        if verifyReplacement(in: elem, at: targetRange.location, expected: replacement) {
+        if verifyReplacement(in: elem, at: absRange.location, expected: replacement) {
             return true
         }
         
@@ -115,7 +115,7 @@ final class TextSwapService {
         
         // Optional verification again (best-effort)
         try? await Task.sleep(nanoseconds: 60_000_000)
-        let ok = verifyReplacement(in: elem, at: targetRange.location, expected: replacement)
+        let ok = verifyReplacement(in: elem, at: absRange.location, expected: replacement)
         print("[Swap] verifyReplacement() after paste = \(ok)")
         return true
     }
@@ -142,10 +142,30 @@ final class TextSwapService {
         return nil
     }
     
-    /// Quick predicate: can we read or count characters here?
+    /// Quick predicate: does this AX element plausibly back editable/readable text?
+    /// Be strict: scrollbars/sliders have kAXValue too (numeric), which we must *not* treat as text.
     private func isTextCapable(_ e: AXUIElement) -> Bool {
-        supportsAttribute(e, kAXValueAttribute as CFString) ||
-        supportsAttribute(e, kAXNumberOfCharactersAttribute as CFString)
+        // 1) Role-based whitelist (most robust and fast)
+        if let r = role(of: e), ["AXTextArea","AXTextField","AXWebArea","AXText","AXStaticText"].contains(r) {
+            return true
+        }
+        // 2) Character-count support is a strong indicator for rich editors
+        if supportsAttribute(e, kAXNumberOfCharactersAttribute as CFString) {
+            return true
+        }
+        
+        // 2.5) Selection/insertion support is also a strong indicator (rich editors)
+        if supportsAttribute(e, kAXSelectedTextRangeAttribute as CFString) ||
+           supportsAttribute(e, kAXSelectedTextAttribute as CFString) {
+            return true
+        }
+        // 3) kAXValue counts only if it's an actual String (not NSNumber/Double/etc)
+        var out: CFTypeRef?
+        if AXUIElementCopyAttributeValue(e, kAXValueAttribute as CFString, &out) == .success,
+           out is String {
+            return true
+        }
+        return false
     }
     
     /// Breadth‑first search DOWN the tree for a text-capable element (Pages/Web editors).
@@ -174,6 +194,12 @@ final class TextSwapService {
             if node.depth >= maxDepth { continue }
     
             let kids = children(of: node.elem)
+            if !kids.isEmpty {
+                let roles = kids.compactMap { role(of: $0) }
+                print("[Swap] BFS children of \(short(describe(elem: node.elem), max: 28)) → \(kids.count)  roles=\(roles.joined(separator: ","))")
+            } else {
+                print("[Swap] BFS children of \(short(describe(elem: node.elem), max: 28)) → 0")
+            }
             // Small heuristic: scan likely text roles first
             let preferredRoles: Set<String> = ["AXTextArea","AXTextField","AXWebArea","AXText"]
             let prioritized = kids.sorted { (a, b) -> Bool in
@@ -188,14 +214,20 @@ final class TextSwapService {
         return nil
     }
     
-    /// Children helper
+    /// Children helper: try common containers in order
     private func children(of elem: AXUIElement) -> [AXUIElement] {
-        var out: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(elem, kAXChildrenAttribute as CFString, &out) == .success,
-              let arr = out as? [AXUIElement] else {
-            return []
+        func readArray(_ attr: CFString) -> [AXUIElement] {
+            var out: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(elem, attr, &out) == .success else { return [] }
+            return (out as? [AXUIElement]) ?? []
         }
-        return arr
+        let a = readArray(kAXChildrenAttribute as CFString)
+        if !a.isEmpty { return a }
+        let b = readArray(kAXVisibleChildrenAttribute as CFString)
+        if !b.isEmpty { return b }
+        let c = readArray(kAXContentsAttribute as CFString)
+        if !c.isEmpty { return c }
+        return []
     }
     
     /// Role helper (for logging/priority)
@@ -254,10 +286,10 @@ final class TextSwapService {
         return AXUIElementSetAttributeValue(elem, attr, cf) == .success
     }
     
-    private func copyFullText(from elem: AXUIElement) -> (String, Int)? {
+    private func copyFullText(from elem: AXUIElement) -> (String, Int, Int)? {
         if let s = copyStringAttribute(elem, kAXValueAttribute as CFString) {
             print("[Swap] copyFullText: using kAXValue (len=\((s as NSString).length))")
-            return (s, (s as NSString).length)
+            return (s, (s as NSString).length, 0)
         }
         // Fallback: parameterized text access (common in Pages/WebKit/Chromium)
         var out: CFTypeRef?
@@ -271,15 +303,40 @@ final class TextSwapService {
             if AXUIElementCopyParameterizedAttributeValue(elem, kAXStringForRangeParameterizedAttribute as CFString, axRange, &strOut) == .success,
                let s = strOut as? String {
                 print("[Swap] copyFullText: using kAXStringForRange (len=\(length))")
-                return (s, length)
+                return (s, length, 0)
             }
             // Then attributed string
             if AXUIElementCopyParameterizedAttributeValue(elem, kAXAttributedStringForRangeParameterizedAttribute as CFString, axRange, &strOut) == .success,
                let a = strOut as? NSAttributedString {
                 print("[Swap] copyFullText: using kAXAttributedStringForRange (len=\(length))")
-                return (a.string, length)
+                return (a.string, length, 0)
             }
             print("[Swap] copyFullText: parameterized read FAILED (length=\(length))")
+        }
+        // Last resort: visible character range (rich editors often expose this)
+        var vrOut: CFTypeRef?
+        if AXUIElementCopyAttributeValue(elem, kAXVisibleCharacterRangeAttribute as CFString, &vrOut) == .success,
+           let raw = vrOut,
+           CFGetTypeID(raw) == AXValueGetTypeID() {
+            let axVal = raw as! AXValue
+            if AXValueGetType(axVal) == .cfRange {
+                var cr = CFRange(location: 0, length: 0)
+                if AXValueGetValue(axVal, .cfRange, &cr) {
+                    var axRange = cr
+                    guard let rangeVal = AXValueCreate(.cfRange, &axRange) else { return nil }
+                    var strOut: CFTypeRef?
+                    if AXUIElementCopyParameterizedAttributeValue(elem, kAXStringForRangeParameterizedAttribute as CFString, rangeVal, &strOut) == .success,
+                       let s = strOut as? String {
+                        print("[Swap] copyFullText: using kAXVisibleCharacterRange (len=\(cr.length), base=\(cr.location))")
+                        return (s, cr.length, cr.location)
+                    }
+                    if AXUIElementCopyParameterizedAttributeValue(elem, kAXAttributedStringForRangeParameterizedAttribute as CFString, rangeVal, &strOut) == .success,
+                       let a = strOut as? NSAttributedString {
+                        print("[Swap] copyFullText: using kAXVisibleCharacterRange (attributed) (len=\(cr.length), base=\(cr.location))")
+                        return (a.string, cr.length, cr.location)
+                    }
+                }
+            }
         }
         print("[Swap] copyFullText: no kAXValue and no parameterized text available")
         return nil
@@ -405,6 +462,104 @@ final class TextSwapService {
         let keyUp = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false)!
         keyUp.flags = flags
         keyUp.post(tap: .cgSessionEventTap)
+    }
+    
+    // MARK: - Window/App fallback search
+    
+    /// If focused element search fails (Pages case), search the focused window, then all app windows.
+    private func resolveViaWindowAndAppFallback(from start: AXUIElement) -> AXUIElement? {
+        // 1) Get the AXApplication for the frontmost app.
+        guard let appElem = frontmostApplicationElement() else {
+            print("[Swap] window/app fallback: no frontmost application element")
+            return nil
+        }
+        // 2) Try focused window first (most likely to contain caret).
+        if let win = focusedWindow(of: appElem) {
+            print("[Swap] window fallback: searching focused window…")
+            if let hit = bfsFindActiveText(in: win, label: "FocusedWindow") {
+                return hit
+            }
+        } else {
+            print("[Swap] window fallback: kAXFocusedWindow not available")
+        }
+        // 3) Try all app windows (bounded).
+        let wins = allWindows(of: appElem)
+        print("[Swap] app fallback: searching \(wins.count) window(s)…")
+        for (i, w) in wins.enumerated() {
+            if let hit = bfsFindActiveText(in: w, label: "AppWindow[\(i)]") {
+                return hit
+            }
+        }
+        return nil
+    }
+    
+    private func frontmostApplicationElement() -> AXUIElement? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        return AXUIElementCreateApplication(app.processIdentifier)
+    }
+    
+    private func focusedWindow(of app: AXUIElement) -> AXUIElement? {
+        var out: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &out) == .success,
+              let raw = out,
+              CFGetTypeID(raw) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        // Perform a non-optional cast after the CF type check
+        let win: AXUIElement = raw as! AXUIElement
+        return win
+    }
+    
+    private func allWindows(of app: AXUIElement) -> [AXUIElement] {
+        var out: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &out) == .success,
+              let arr = out as? [AXUIElement] else {
+            return []
+        }
+        return arr
+    }
+    
+    /// Prefer a text-capable element that appears active (focused/selection/insertion present).
+    private func bfsFindActiveText(in root: AXUIElement, label: String) -> AXUIElement? {
+        struct Node { let e: AXUIElement; let d: Int }
+        var q: [Node] = [Node(e: root, d: 0)]
+        var seen = Set<UnsafeMutableRawPointer>()
+        var visited = 0
+        let maxDepth = 12
+        let maxNodes = 5000
+    
+        func id(_ e: AXUIElement) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(e).toOpaque() }
+        func isActive(_ e: AXUIElement) -> Bool {
+            // Focused attribute OR selection/insertion APIs present
+            var out: CFTypeRef?
+            if AXUIElementCopyAttributeValue(e, kAXFocusedAttribute as CFString, &out) == .success,
+               let b = out as? Bool, b { return true }
+            if supportsAttribute(e, kAXSelectedTextRangeAttribute as CFString) ||
+               supportsAttribute(e, kAXSelectedTextAttribute as CFString) {
+                return true
+            }
+            return false
+        }
+    
+        print("[Swap] \(label): BFS start")
+        while !q.isEmpty {
+            let n = q.removeFirst()
+            let eid = id(n.e)
+            if seen.contains(eid) { continue }
+            seen.insert(eid)
+            visited += 1
+            if visited > maxNodes { print("[Swap] \(label): BFS cap hit at \(visited) nodes"); break }
+    
+            if isTextCapable(n.e) && isActive(n.e) {
+                print("[Swap] \(label): found active text element at depth \(n.d): \(describe(elem: n.e))")
+                return n.e
+            }
+            if n.d >= maxDepth { continue }
+            let kids = children(of: n.e)
+            for c in kids { q.append(Node(e: c, d: n.d + 1)) }
+        }
+        print("[Swap] \(label): BFS found no active text element (visited=\(visited))")
+        return nil
     }
     
 
