@@ -56,18 +56,19 @@ const SERVER_DEPLOYMENTS = (process.env.METORIAL_SERVER_DEPLOYMENTS || "")
   .filter(Boolean);
 
 // Create OAuth sessions for services that require user authentication
-let [googleCalOAuthSession] = await Promise.all([
-  metorial.oauth.sessions.create({ 
-    serverDeploymentId: SERVER_DEPLOYMENTS[0] 
-  }),
-]);
+//disabled for now, but established.
+// let [googleCalOAuthSession] = await Promise.all([
+//   metorial.oauth.sessions.create({ 
+//     serverDeploymentId: SERVER_DEPLOYMENTS[0] 
+//   }),
+// ]);
 
-console.log('OAuth URLs for user authentication:');
-console.log(`   Google Calendar: ${googleCalOAuthSession.url}`);
+// console.log('OAuth URLs for user authentication:');
+// console.log(`   Google Calendar: ${googleCalOAuthSession.url}`);
 
 
-await metorial.oauth.waitForCompletion([googleCalOAuthSession]);
-console.log('OAuth sessions completed!');
+// await metorial.oauth.waitForCompletion([googleCalOAuthSession]);
+// console.log('OAuth sessions completed!');
 
 
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
@@ -230,10 +231,7 @@ app.post("/analyze", async (req, res) => {
       const tLLMTools0 = performance.now();
       const resultTools = await metorial.run({
         message,
-        serverDeployments:[{ 
-          serverDeploymentId: serverDeployments[0], 
-          oauthSessionId: googleCalOAuthSession.id 
-        }],
+        serverDeployments,
         model: OPENAI_MODEL,
         client: openai,
         maxSteps: METORIAL_MAX_STEPS
